@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 
 from ..core.ir import Item, Kind
@@ -25,6 +24,10 @@ SUMMARY_PREFIX = "This session is being continued from a previous conversation"
 # `/compact` and auto-compact, in every variant: "... of the conversation so far", "... of this
 # conversation" (the earlier part, recent messages kept) and "... of the RECENT portion ...".
 COMPACT_PROMPT = "Your task is to create a detailed summary of"
+INSTRUCTION_FILE = re.compile(r"^Contents of (\S+) \(", re.M)
+REMINDERS = {"instructions": "Codebase and user instructions are shown below",
+             "reread:": "Instruction files were re-read",  # (by the files it names)
+             "attribution": "Attribution for git commits"}
 
 
 def settings_file() -> Path:
@@ -34,16 +37,12 @@ def settings_file() -> Path:
 class ClaudeCode(Harness):
     name = "claude_code"
     injected = (REMINDER, COMMAND)
+    summaries = (SUMMARY_PREFIX,)
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return "x-claude-code-session-id" in headers or headers.get(
             "user-agent", ""
         ).startswith("claude-cli")
-
-    def refine(self, item: Item) -> Item:
-        if item.kind is Kind.USER and self.visible(item.text).startswith(SUMMARY_PREFIX):
-            return replace(item, kind=Kind.SUMMARY)
-        return super().refine(item)  # context only when nothing but injected blocks remains
 
     def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
         """`/compact` (and auto-compact) appends its prompt to the last user message, which system
@@ -53,12 +52,20 @@ class ClaudeCode(Harness):
         return last is not None and COMPACT_PROMPT in last.text
 
     def state_key(self, item: Item) -> str | None:
-        """System messages that restate the environment, or which MCP servers' instructions apply."""
+        """Reminders that restate its state, wherever they come (after compacting itself it
+        re-injects them below its summary): the instruction files, those re-read since, the
+        attribution guidance; and the system message with the environment (the agents, the MCP
+        servers' instructions), or which MCP servers' instructions apply."""
 
+        text = item.text.lstrip()
+        if item.kind is Kind.CONTEXT:
+            for key, start in REMINDERS.items():
+                if text.startswith(f"<system-reminder>\n{start}"):
+                    return key + ",".join(sorted(set(INSTRUCTION_FILE.findall(text)))) if key.endswith(":") else key
+            return None
         if item.kind is not Kind.SYSTEM:
             return None
-        text = item.text.lstrip()
-        if text.startswith("# Environment"):
+        if "# Environment\n" in text or text.startswith("# Environment"):
             return "environment"
         if text.startswith("# MCP Server Instructions") or "MCP servers have disconnected" in text:
             return "mcp"

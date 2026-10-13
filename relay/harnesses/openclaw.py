@@ -10,6 +10,7 @@ from pathlib import Path
 from ..core.ir import Item, Kind
 from ..install import Setting
 from .base import Harness
+from .pi import SUMMARIES
 
 DEFAULTS = {  # provider -> (default endpoint, native request adapter)
     "openai": ("https://api.openai.com/v1", None),
@@ -19,14 +20,18 @@ DEFAULTS = {  # provider -> (default endpoint, native request adapter)
 
 
 INTERNAL_CONTEXT = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>"
+# Messages it sends the model as the user would (`sendCustomMessage`): a check that a saved plan
+# still has steps left, a tool call cut off at the output limit, a turn the user interrupted.
+NOTICES = ("This run’s latest successfully saved plan", "Runtime notice: The tool call", "<turn_aborted>")
 
 
 class OpenClaw(Harness):
     name = "openclaw"
+    summaries = SUMMARIES
 
     def refine(self, item: Item) -> Item:
         # Its internal-context message (sessions, subagents) follows each user message: OpenClaw's.
-        if item.kind is Kind.USER and item.text.lstrip().startswith(INTERNAL_CONTEXT):
+        if item.kind is Kind.USER and item.text.lstrip().startswith((INTERNAL_CONTEXT, *NOTICES)):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
 

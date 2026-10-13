@@ -17,6 +17,7 @@ DEFAULTS = {
 
 class Goose(Harness):
     name = "goose"
+    summaries = ("# Conversation Summary",)  # (the user's message after it compacted)
 
     def settings(self) -> list[Setting]:
         config = Path(os.getenv("XDG_CONFIG_HOME", "~/.config")).expanduser() / "goose/config.yaml"

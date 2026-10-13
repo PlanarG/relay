@@ -341,10 +341,10 @@ def _entry(item: Item, originals: list[Item]) -> dict[str, Any]:
     or an item Relay writes."""
 
     media = {"media": [asdict(m) for m in item.media]}
-    if item.ref is not None:
+    if item.ref is not None:  # (a block of a user message is context of its own)
         original = originals[item.ref]
-        return {"ref": item.ref} if (item.text, item.media) == (original.text, original.media) else {
-            "ref": item.ref, "text": item.text, **media}
+        return {"ref": item.ref} if (item.kind, item.text, item.media) == (original.kind, original.text, original.media) else {
+            "ref": item.ref, "kind": item.kind.value, "text": item.text, **media}
     return {"kind": item.kind.value, "text": item.text, **(media if item.media else {}),
             **({"wire": item.wire} if item.wire else {})}
 
@@ -353,7 +353,8 @@ def _item(entry: dict[str, Any], originals: list[Item]) -> Item:
     media = tuple(Media(**m) for m in entry.get("media", []))
     if "ref" in entry:
         original = originals[entry["ref"]]
-        return replace(original, text=entry["text"], media=media) if "text" in entry else original
+        kind = Kind(entry.get("kind", original.kind.value))
+        return replace(original, kind=kind, text=entry["text"], media=media) if "text" in entry else original
     return Item(Kind(entry["kind"]), entry["text"], media=media, wire=entry.get("wire"))
 
 

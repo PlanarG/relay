@@ -14,10 +14,14 @@ from .base import Harness, plugin_file
 
 
 SECTION = re.compile(r'Updated system prompt section "([^"]+)"')
+# Its compaction's summary, and a branch's it came back from (OpenClaw, built on pi, too).
+SUMMARIES = ("The conversation history before this point was compacted into the following summary:",
+             "The following is a summary of a branch that this conversation came back from:")
 
 
 class Pi(Harness):
     name = "pi"
+    summaries = SUMMARIES
 
     def state_key(self, item: Item) -> str | None:
         """A resumed session appends its system prompt anew, with instruction files as they are now;

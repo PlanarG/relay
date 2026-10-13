@@ -204,16 +204,19 @@ Behavior follows `codex-rs/core/src/compact.rs`; prompts are vendored verbatim i
   piece after the summary so far: the skipped compactions, caught up. The same happens if
   the upstream reports an overflow.
 - The new context follows Codex's replacement history: the newest real user messages up
-  to `retain_user_tokens` (the oldest one kept is truncated in the middle; media is
-  reduced to text; earlier summaries are dropped) and the summary as a user message
+  to `retain_user_tokens`, as the user wrote them (blocks the harness injected into them are
+  its state or go into the summary, as Codex keeps its context fragments out of them; the
+  oldest one kept is truncated in the middle; media is reduced to text; earlier summaries,
+  Codex's or the harness's own, are dropped) and the summary as a user message
   starting with Codex's summary prefix. Mid-turn (the request ends with tool results)
   everything is summarized and the summary comes last; at the start of a turn the summary
   covers the history before it and the new turn follows verbatim. Either way the initial
   context sits just above the last real user message kept (Codex 0.162; before, Codex
   re-injected it after the summary at a turn start).
 - The initial context is what the harness injected before the model's first action:
-  system messages and context messages (environment, instructions, `<system-reminder>`
-  blocks). Like Codex, which rebuilds it from session state, Relay takes it from the
+  system messages, context messages (environment, instructions, `<system-reminder>`
+  blocks), and the blocks it put into user messages (Claude Code's CLAUDE.md, WorkBuddy's
+  memory, Gemini CLI's session context), each as a context message of its own. Like Codex, which rebuilds it from session state, Relay takes it from the
   harness's own history, which is resent with every request, so it survives any number of
   compactions. System messages (Codex's base instructions) stay first, except on the
   Anthropic API, where a `system` message may only precede the model's turn: there it
@@ -228,12 +231,16 @@ context to describe the session as it is now:
 | Where the state is | Harnesses | What Relay does |
 | --- | --- | --- |
 | Fields sent with every request (top-level system prompt, instructions, tools) | Hermes Agent, nanobot, mini-swe-agent; Claude Code's and Gemini CLI's system prompts | Nothing to do: these are forwarded as sent. |
-| A first message re-rendered in place | OpenCode, Kilo, Crush, OpenClaw, Goose (system message with AGENTS.md / SOUL.md / `.goosehints`); Gemini CLI (`<session_context>` in the first user message); WorkBuddy (rules and memory in the first user message) | Prefix matching compares those items by position and user messages without the injected blocks (`Harness.identity`), so the compaction survives the change; the current version is what gets forwarded. |
-| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (MCP instructions as system messages) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected. |
+| A first message re-rendered in place | OpenCode, Kilo, Crush, OpenClaw, Goose (system message with AGENTS.md / SOUL.md / `.goosehints`); Gemini CLI (`<session_context>` in the first user message); WorkBuddy (rules and memory in the first user message) | Prefix matching compares those items by position and user messages without the injected blocks (`Harness.identity`), so the compaction survives the change; the current version is what gets forwarded. Blocks in a user message are state of their own after a compaction (the message keeps what the user wrote). |
+| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (CLAUDE.md and the instruction files re-read since, in user messages; the environment, agents and MCP instructions as a system message); Crush (todo reminders) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected, wherever it came (Claude Code re-injects its own below the summary of its own compaction). |
 
-Claude Code's other updates (instruction files re-read on resume, reminders) arrive inside
-user messages, which compaction keeps. Notifications (background tasks finishing) are
-events, not state, and are left to the summary.
+Notifications (background tasks finishing, a sub-agent's report, OpenClaw's reminder of an
+unfinished plan) are events, not state, and are left to the summary. A harness's own
+compaction leaves its summary in the history (`Harness.summaries`: Claude Code's, pi's and
+OpenClaw's, Goose's, Hermes Agent's, Crush's, OpenCode's and Kilo's); a later compaction of
+Relay's summarizes it again rather than keeping it as a user message. Gemini CLI puts its
+summary into its system instruction, nanobot into its system prompt and WorkBuddy into a
+context message: those need nothing.
 
 Sub-agents and multi-agent sessions need no special case: every sub-agent seen (Codex,
 Gemini CLI, OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, DeepSeek Harness, WorkBuddy,
@@ -666,10 +673,11 @@ covered yet.
 ## Extending Relay
 
 - **Harness**: subclass `Harness` in `relay/harnesses/`: `matches` (request headers),
-  `refine` and `injected` (what it writes into the conversation), and, where the defaults do
-  not fit, `identity`, `state_key` or `state`, `place`, `compacting`; then `settings` for
-  `relay install`. Add it to `HARNESSES`. Run `tests/docker/check.py --probe` to see where it
-  keeps state, then a two-turn check, and turn the run into a replay fixture
+  `refine`, `injected` and `summaries` (what it writes into the conversation), and, where the
+  defaults do not fit, `identity`, `state_key` or `state`, `place`, `compacting`; then
+  `settings` for `relay install`. Add it to `HARNESSES`. Run `tests/docker/features.py` to see
+  what it writes (instruction files, todo lists, sub-agents, skills, MCP servers; with
+  `--native`, after compacting itself) and whether Relay's compaction keeps it, then a two-turn check, and turn the run into a replay fixture
   (`python -m tests.replay.build NAME HOME`): `tests/test_replay.py` is the contract every
   harness must meet (every request finds its stored compaction, the latest state reaches
   the model, the request stays well-formed).

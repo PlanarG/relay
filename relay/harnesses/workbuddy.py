@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 
+from ..core.ir import Item
 from ..install import Setting
 from .base import REMINDER, Harness, command_hook
 
@@ -21,6 +22,14 @@ class WorkBuddy(Harness):
     # Memory and rules files, re-rendered in the first user message around its <user_query>.
     injected = (REMINDER, re.compile(r"<always_applied_workspace_rules>.*?</always_applied_workspace_rules>", re.S))
     config_env, config_dir = "WORKBUDDY_CONFIG_DIR", "~/.workbuddy"
+
+    def state_key(self, item: Item) -> str | None:
+        """Its memory and rules, wherever they come (after compacting itself too)."""
+
+        text = item.text.lstrip()
+        if text.startswith('<system-reminder data-role="memory">'):
+            return "memory"
+        return "rules" if text.startswith("<always_applied_workspace_rules>") else None
 
     def starter(self, command: str) -> list[Setting]:
         user = Path(os.getenv(self.config_env) or self.config_dir).expanduser() / "settings.json"
