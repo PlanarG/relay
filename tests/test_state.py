@@ -8,7 +8,8 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind
-from relay.harnesses import ClaudeCode, DeepSeekHarness, GeminiCli, Harness, KimiCode, OpenClaw, Pi, WorkBuddy
+from relay.harnesses import (ClaudeCode, Crush, DeepSeekHarness, GeminiCli, Goose, Harness, Hermes, KimiCode, OpenClaw,
+                             OpenCode, Pi, WorkBuddy)
 from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
 from relay.strategies import Compaction
 
@@ -135,6 +136,55 @@ class StateTests(unittest.TestCase):
         state = ClaudeCode().state(AnthropicMessages(), items)
         self.assertEqual([i.ref for i in state.items], [1, 4])  # environment and MCP; the notification goes
 
+    def test_blocks_injected_into_a_user_message_are_state_of_their_own(self) -> None:
+        claude_md = "<system-reminder>\nCodebase and user instructions are shown below.\n\nContents of /p/CLAUDE.md (project):\nALPHA\n</system-reminder>"
+        reread = ("<system-reminder>\nInstruction files were re-read when this session started:\n\n"
+                  "Contents of /p/CLAUDE.md (project):\nBETA\n</system-reminder>")
+        first = {"role": "user", "content": [{"type": "text", "text": claude_md}, {"type": "text", "text": "task"}]}
+        later = {"role": "user", "content": [{"type": "text", "text": reread}, {"type": "text", "text": "next"}]}
+        items = [first, {"role": "assistant", "content": "done"}, later]
+        state = ClaudeCode().state(AnthropicMessages(), items)
+        self.assertEqual([(i.ref, i.kind, i.text) for i in state.items],
+                         [(0, Kind.CONTEXT, claude_md), (2, Kind.CONTEXT, reread)])
+
+    def test_reinjected_blocks_replace_their_earlier_copy_wherever_they_come(self) -> None:
+        def claude_md(codename: str) -> str:
+            return f"<system-reminder>\nCodebase and user instructions are shown below.\n{codename}\n</system-reminder>"
+        items = [{"role": "user", "content": "This session is being continued from a previous conversation. S"},
+                 {"role": "assistant", "content": "done"},  # (Claude Code after compacting itself)
+                 {"role": "user", "content": [{"type": "text", "text": claude_md("BETA")}, {"type": "text", "text": "next"}]}]
+        state = ClaudeCode().state(AnthropicMessages(), items)
+        self.assertEqual([i.text for i in state.items], [claude_md("BETA")])
+
+    def test_crush_todo_reminders_are_context_and_the_latest_is_state(self) -> None:
+        empty = msg("user", "<system_reminder>This is a reminder that your todo list is currently empty.</system_reminder>")
+        listed = msg("user", "<system_reminder>Your todo list: 1. read file_1</system_reminder>")
+        self.assertIs(Crush().refine(CODEC.classify(empty)).kind, Kind.CONTEXT)
+        state = Crush().state(CODEC, [msg("user", "task"), empty, *step(1), listed, *step(2)])
+        self.assertEqual([i.ref for i in state.items], [4])
+
+    def test_each_harness_knows_the_summaries_of_its_own_compaction(self) -> None:
+        summaries = {
+            ClaudeCode(): "This session is being continued from a previous conversation that ran out of context.",
+            Pi(): "The conversation history before this point was compacted into the following summary:\n\n<summary>\nS",
+            OpenClaw(): "The conversation history before this point was compacted into the following summary:\n\n<summary>\nS",
+            Goose(): "# Conversation Summary\n## User Intent\n- read the files",
+            Hermes(): "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.",
+            Crush(): "## Current State\n- reading file_3.txt",
+            OpenCode(): "What did we do so far?",
+        }
+        for harness, text in summaries.items():
+            self.assertIs(harness.refine(CODEC.classify(msg("user", text))).kind, Kind.SUMMARY, harness.name)
+            self.assertIs(Harness().refine(CODEC.classify(msg("user", text))).kind, Kind.USER)
+        nudge = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+        self.assertIs(OpenCode().refine(CODEC.classify(msg("user", nudge))).kind, Kind.CONTEXT)
+
+    def test_openclaws_notices_are_its_own(self) -> None:
+        for text in ("This run’s latest successfully saved plan still has unfinished steps.",
+                     "Runtime notice: The tool call was cut off at the provider's output limit.",
+                     "<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"):
+            self.assertIs(OpenClaw().refine(CODEC.classify(msg("user", text))).kind, Kind.CONTEXT)
+
 
 class PlacementTests(unittest.TestCase):
     """`Harness.place`: where the state goes in a rewritten head (Codex's rule by default)."""
@@ -155,6 +205,11 @@ class PlacementTests(unittest.TestCase):
         head = Harness().place((self.first, self.summary), (self.system, self.context))
         self.assertEqual(head, (self.system, self.context, self.first, self.summary))
 
+    def test_the_user_messages_kept_are_what_the_user_wrote(self) -> None:
+        injected = Item(Kind.USER, "<system-reminder>\nCLAUDE.md: ALPHA\n</system-reminder>first task", 2)
+        head = Harness().place((injected, self.last, self.summary), (self.context,))
+        self.assertEqual(head, (Item(Kind.USER, "first task", 2), self.context, self.last, self.summary))
+
 
 class EngineStateTests(unittest.TestCase):
     """The engine puts the harness's state into any rewrite: no duplicates, nothing stale."""
@@ -170,6 +225,26 @@ class EngineStateTests(unittest.TestCase):
         self.assertTrue(exchange.compacted)
         self.assertEqual((sent.count("Today's date"), sent.count("Auto permission mode"), sent.count("Plan mode")), (1, 0, 1))
         self.assertTrue(sent.index("Today's date") < sent.index('"next"') < sent.index("Plan mode"))
+
+    def test_instructions_injected_into_a_user_message_become_state_and_the_message_what_was_typed(self) -> None:
+        engine = Engine(Compaction(threshold=300, min_gain=0))
+        claude_md = "<system-reminder>\nCodebase and user instructions are shown below.\nALPHA\n</system-reminder>"
+        task = {"role": "user", "content": [{"type": "text", "text": claude_md}, {"type": "text", "text": "the first task"}]}
+
+        def tool(i: int, size: int = 800) -> list[dict[str, Any]]:
+            return [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Read", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * size}]}]
+        summary = (200, {"content": [{"type": "text", "text": "S"}], "stop_reason": "end_turn"})
+        items = [task, *tool(1), *tool(2), {"role": "user", "content": "next"}, *tool(3)]
+        for n, extra in enumerate(([], tool(4, 10))):  # compacting, then from the stored compaction
+            exchange = engine.prepare(AnthropicMessages(), ClaudeCode(), {"model": "m", "messages": [*items, *extra]},
+                                      tenant="t", post=lambda r: summary)
+            self.assertEqual(exchange.compacted, n == 0)
+            engine.record(exchange, 100)  # the compacted request is small
+            sent = [ClaudeCode().refine(AnthropicMessages().classify(m)) for m in exchange.body["messages"]]
+            self.assertEqual([(i.kind, i.text) for i in sent[:3]],
+                             [(Kind.USER, "the first task"), (Kind.CONTEXT, claude_md), (Kind.USER, "next")])
+            self.assertIs(sent[3].kind, Kind.SUMMARY)
 
 
 class MaskedToolOutputTests(unittest.TestCase):

@@ -30,6 +30,15 @@ class GeminiCli(Harness):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
 
+    def state_key(self, item: Item) -> str | None:
+        """The session context (date, workspace, GEMINI.md, the MCP servers' instructions), which it
+        re-renders in place, and a sub-agent's loaded context."""
+
+        text = item.text.lstrip()
+        if text.startswith("<session_context>") or text.startswith(CONTEXT_PREFIX):
+            return "session"
+        return "loaded" if text.startswith("<loaded_context>") else None
+
     def identity(self, codec: Codec, items: list[WireItem]) -> list[bytes]:
         """Gemini CLI masks bulky old tool outputs in place (`<tool_output_masked>`; there is no
         setting to stop it), so a tool result compares by the calls it answers, not its output."""

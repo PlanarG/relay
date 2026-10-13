@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
+from ..core.ir import Item, Kind
 from ..install import Setting
-from .base import Harness
+from .base import REMINDER, Harness
 
 DEFAULTS = {
     "openai": "https://api.openai.com/v1",
@@ -18,6 +20,12 @@ DEFAULTS = {
 
 class Crush(Harness):
     name = "crush"
+    # Its reminders of the todo list, as messages of their own.
+    injected = (REMINDER, re.compile(r"<system_reminder>.*?</system_reminder>", re.S))
+    summaries = ("## Current State",)  # (its summary prompt's first required section)
+
+    def state_key(self, item: Item) -> str | None:
+        return "todo" if item.kind is Kind.CONTEXT and "todo list" in item.text else None
 
     def settings(self) -> list[Setting]:
         """Wrap the providers the user configured (or, if none, the built-in ones)."""

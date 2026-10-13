@@ -41,6 +41,7 @@ class Harness:
 
     name = "generic"
     injected: tuple[re.Pattern[str], ...] = (REMINDER,)  # blocks the harness writes into user messages
+    summaries: tuple[str, ...] = ()  # how the summaries of its own compaction start (Codex's: every harness)
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return False
@@ -48,7 +49,7 @@ class Harness:
     def refine(self, item: Item) -> Item:
         """Reclassify user-role items the harness wrote itself (context, summaries)."""
 
-        if item.kind is Kind.USER and item.text.startswith(SUMMARY_PREFIX):
+        if item.kind is Kind.USER and self.visible(item.text).startswith((SUMMARY_PREFIX, *self.summaries)):
             return replace(item, kind=Kind.SUMMARY)
         if item.kind is Kind.USER and item.text.strip() and not self.visible(item.text):
             return replace(item, kind=Kind.CONTEXT)
@@ -60,6 +61,11 @@ class Harness:
         for pattern in self.injected:
             text = pattern.sub("", text)
         return text.strip()
+
+    def blocks(self, text: str) -> list[str]:
+        """The blocks the harness injected into `text`, in order."""
+
+        return [block for _, block in sorted((m.start(), m.group(0)) for p in self.injected for m in p.finditer(text))]
 
     def state_key(self, item: Item) -> str | None:
         """Which piece of the harness's state an injected context item restates (a date, a mode,
@@ -98,31 +104,48 @@ class Harness:
         return False
 
     def state(self, codec: Codec, items: list[WireItem]) -> State:
-        """The harness's state at the end of `items`: by default the system and context items it
-        wrote before the model's first action, with each piece of state the profile names
-        (`state_key`) at its latest version, and named state that first appeared later."""
+        """The harness's state at the end of `items`: by default what it wrote before the model's
+        first action (its system and context items, and the blocks it put into user messages, as
+        context of their own), with each piece of state the profile names (`state_key`) at its
+        latest version, and named state that first appeared later."""
 
         view = [self.refine(codec.classify(wire)) for wire in items]
         first = next((i for i, item in enumerate(view) if item.kind in AGENT_KINDS), len(view))
-        keys = {i: key for i, item in enumerate(view) if item.kind in CONTEXT_KINDS and (key := self.state_key(item))}
-        latest = {key: i for i, key in sorted(keys.items())}
+        pieces = []
+        for i, item in enumerate(view):
+            if item.kind in CONTEXT_KINDS:
+                pieces.append(replace(item, ref=i))
+            elif item.kind is Kind.USER:  # (sent as a message of the block alone)
+                pieces += [Item(Kind.CONTEXT, block, ref=i) for block in self.blocks(item.text)]
+        keys = {n: key for n, piece in enumerate(pieces) if (key := self.state_key(piece))}
+        latest = {key: n for n, key in sorted(keys.items())}
         chosen: list[int] = []
-        for i in range(first):
-            if view[i].kind in CONTEXT_KINDS and (pick := latest.get(keys.get(i, ""), i)) not in chosen:
+        for n, piece in enumerate(pieces):
+            if piece.ref < first and (pick := latest.get(keys.get(n, ""), n)) not in chosen:
                 chosen.append(pick)
-        chosen += [i for i in latest.values() if i not in chosen]
-        return State(tuple(replace(view[i], ref=i) for i in chosen))
+        chosen += [n for n in latest.values() if n not in chosen]
+        return State(tuple(pieces[n] for n in chosen))
 
     def place(self, head: tuple[Item, ...], state: tuple[Item, ...]) -> tuple[Item, ...]:
         """Put the harness's state into a compacted head (ending with its summary), the way Codex
         (0.162) does after compacting, mid-turn and at a turn start alike: system items first, the
-        context just above the last real user message (or the summary, which stays last)."""
+        context just above the last real user message (or the summary, which stays last). The user
+        messages kept are what the user wrote, as Codex keeps them: what the harness injected into
+        them is state, or was summarized."""
 
+        head = tuple(kept for item in head if (kept := self._typed(item)) is not None)
         system = tuple(item for item in state if item.kind is Kind.SYSTEM)
         context = tuple(item for item in state if item.kind is not Kind.SYSTEM)
         last = lambda kind: next((n for n in range(len(head) - 1, -1, -1) if head[n].kind is kind), None)
         at = next(n for n in (last(Kind.USER), last(Kind.SUMMARY), len(head)) if n is not None)
         return (*system, *head[:at], *context, *head[at:])
+
+    def _typed(self, item: Item) -> Item | None:
+        """A user message as the user wrote it (None: the harness wrote all of it)."""
+
+        if item.kind is not Kind.USER or (text := self.visible(item.text)) == item.text.strip():
+            return item
+        return replace(item, text=text) if text or item.media else None
 
     def window(self, model: str | None) -> int | None:
         """The model's context window as the harness itself knows it (its model catalog), if it

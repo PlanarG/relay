@@ -23,6 +23,7 @@ DEFAULTS = {
 
 class Hermes(Harness):
     name = "hermes"
+    summaries = ("[CONTEXT COMPACTION — REFERENCE ONLY]", "[CONTEXT SUMMARY]:")  # (and its older one)
 
     def starter(self, command: str) -> list[Setting]:
         """A plugin of Relay's in its user plugins, enabled (user plugins are opt-in)."""
